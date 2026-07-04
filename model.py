@@ -2,8 +2,7 @@ import yfinance as yf
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+from sklearn.linear_model import LinearRegression
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -11,7 +10,7 @@ def fetch_stock_data(ticker, period="2y"):
     """Download stock data from Yahoo Finance"""
     stock = yf.Ticker(ticker)
     df = stock.history(period=period)
-    df = df[['Close', 'Volume', 'High', 'Low']]
+    df = df[['Close', 'Volume', 'High', 'Low', 'Open']]
     df.dropna(inplace=True)
     return df
 
@@ -31,90 +30,53 @@ def calculate_moving_averages(df):
     df['RSI'] = calculate_rsi(df['Close'])
     return df
 
-def prepare_lstm_data(data, lookback=60):
-    """Prepare data for LSTM model"""
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_data = scaler.fit_transform(data.reshape(-1, 1))
-
-    X, y = [], []
-    for i in range(lookback, len(scaled_data)):
-        X.append(scaled_data[i-lookback:i, 0])
-        y.append(scaled_data[i, 0])
-
-    X = np.array(X)
-    y = np.array(y)
-    X = np.reshape(X, (X.shape[0], X.shape[1], 1))
-
-    return X, y, scaler
-
-def build_lstm_model(lookback=60):
-    """Build LSTM neural network"""
-    model = Sequential([
-        LSTM(50, return_sequences=True, input_shape=(lookback, 1)),
-        Dropout(0.2),
-        LSTM(50, return_sequences=False),
-        Dropout(0.2),
-        Dense(25),
-        Dense(1)
-    ])
-    model.compile(optimizer='adam', loss='mean_squared_error')
-    return model
-
 def predict_next_7_days(ticker):
-    """Main function — fetch data, train model, predict 7 days"""
+    """Fetch data and predict 7 days using ML"""
     print(f"📈 Fetching data for {ticker}...")
     df = fetch_stock_data(ticker)
     df = calculate_moving_averages(df)
 
-    # Prepare training data
+    # Prepare features
     close_prices = df['Close'].values
-    lookback = 60
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaled = scaler.fit_transform(close_prices.reshape(-1, 1))
 
-    print(f"🧠 Training LSTM model...")
-    X, y, scaler = prepare_lstm_data(close_prices, lookback)
+    # Create sequences (60 day lookback)
+    lookback = 60
+    X, y = [], []
+    for i in range(lookback, len(scaled)):
+        X.append(scaled[i-lookback:i, 0])
+        y.append(scaled[i, 0])
+
+    X = np.array(X)
+    y = np.array(y)
+
+    # Train linear regression on sequences
+    # Flatten X for sklearn
+    X_flat = X.reshape(X.shape[0], -1)
 
     # Train on 80% of data
-    split = int(len(X) * 0.8)
-    X_train, y_train = X[:split], y[:split]
+    split = int(len(X_flat) * 0.8)
+    X_train = X_flat[:split]
+    y_train = y[:split]
 
-    # Build and train model
-    model = build_lstm_model(lookback)
-    model.fit(
-        X_train, y_train,
-        epochs=10,
-        batch_size=32,
-        verbose=0
-    )
-    print(f"✅ Model trained!")
+    model = LinearRegression()
+    model.fit(X_train, y_train)
+    print("✅ Model trained!")
 
-    # Predict next 7 days
-    last_60_days = close_prices[-lookback:]
+    # Predict next 7 days iteratively
     predictions = []
-
-    current_batch = scaler.transform(
-        last_60_days.reshape(-1, 1)
-    ).reshape(1, lookback, 1)
+    current_seq = scaled[-lookback:].flatten()
 
     for _ in range(7):
-        pred = model.predict(current_batch, verbose=0)[0]
-        predictions.append(pred[0])
-        current_batch = np.append(
-            current_batch[:, 1:, :],
-            [[pred]],
-            axis=1
-        )
+        pred = model.predict(current_seq.reshape(1, -1))[0]
+        predictions.append(pred)
+        current_seq = np.append(current_seq[1:], pred)
 
-    # Inverse transform predictions
+    # Inverse transform
     predictions = scaler.inverse_transform(
         np.array(predictions).reshape(-1, 1)
     ).flatten()
 
-    print(f"🔮 7-day predictions: {predictions.round(2)}")
-
+    print(f"🔮 Predictions: {predictions.round(2)}")
     return df, predictions
-
-if __name__ == "__main__":
-    df, predictions = predict_next_7_days("AAPL")
-    print(f"\n✅ Done!")
-    print(f"Last close: ${df['Close'].iloc[-1]:.2f}")
-    print(f"Predicted prices: {predictions.round(2)}")
